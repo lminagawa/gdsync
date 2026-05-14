@@ -6,11 +6,13 @@
 
 [![Go 1.22+](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go)](https://go.dev) [![macOS · Windows](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-lightgrey)]() [![status: MVP](https://img.shields.io/badge/status-MVP-blue)]()
 
+🌐 **English** ・ [日本語](README.ja.md)
+
 `gdsync` is a single-binary CLI that **mirrors a Git working tree, in one direction, to a destination directory on your local filesystem** — typically the local mount of OneDrive, Google Drive, Dropbox, or iCloud Drive. It watches the tree in real time, respects `.gitignore`, survives transient file-lock errors that cloud sync clients love to throw, and — crucially — **detects rewinds**: when your AI agent runs `git reset --hard` or its own `/rewind` and the working tree shrinks, the cloud folder shrinks with it.
 
 ---
 
-## Why it exists / 開発の背景
+## Why it exists
 
 Modern AI coding agents (Claude Code, Cursor, Aider, and friends) edit working trees in bursts: dozens of files written, deleted, refactored, then sometimes wholesale undone. Two things break under that workload when your project lives inside a cloud-synced folder:
 
@@ -20,8 +22,6 @@ Modern AI coding agents (Claude Code, Cursor, Aider, and friends) edit working t
 The result is a project directory that drifts away from what Git says it is, polluted with stale artifacts the next agent will then re-edit. The cure is to **stop treating the cloud folder as a workspace** and start treating it as a mirror — refreshed continuously from a source of truth that already knows how to express intent: the Git working tree.
 
 `gdsync` is that mirror.
-
-> 日本語: Claude Code 等の AI エージェントは `\rewind` や `git reset` を多用します。一方 OneDrive / Google Drive のクライアントは独自のスナップショット差分でしか動かないため、「Git で消したはずのファイル」がクラウドに残る、あるいは復活する事故が起きがちです。`gdsync` は Git ツリーを唯一の真実とし、ローカルマウントへ単方向ミラーリングすることでこの種の事故を構造的に防ぎます。
 
 ---
 
