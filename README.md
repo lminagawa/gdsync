@@ -1,108 +1,103 @@
 # gdsync — `git-drive-sync`
 
-> **One-way sync from a Git working tree to your cloud-mounted folder, built for the AI-coding era.**
->
-> Git is the truth. The cloud is the mirror. When your agent rewinds, the cloud rewinds.
+> One-way sync from a Git working tree to a cloud-mounted folder.
+> Built for AI agents that rewind often.
 
 [![Go 1.22+](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go)](https://go.dev) [![macOS · Windows](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-lightgrey)]() [![status: MVP](https://img.shields.io/badge/status-MVP-blue)]()
 
 🌐 **English** ・ [日本語](README.ja.md)
 
-`gdsync` is a single-binary CLI that **mirrors a Git working tree, in one direction, to a destination directory on your local filesystem** — typically the local mount of OneDrive, Google Drive, Dropbox, or iCloud Drive. It watches the tree in real time, respects `.gitignore`, survives transient file-lock errors that cloud sync clients love to throw, and — crucially — **detects rewinds**: when your AI agent runs `git reset --hard` or its own `/rewind` and the working tree shrinks, the cloud folder shrinks with it.
+`gdsync` mirrors a Git working tree to a destination folder — typically a OneDrive, Google Drive, Dropbox, or iCloud Drive mount. Real-time watcher, `.gitignore`-aware, retries through cloud file locks. The point: when `git reset --hard` shrinks your tree, the cloud folder shrinks with it.
 
 ---
 
-## Why it exists
+## The problem
 
-Modern AI coding agents (Claude Code, Cursor, Aider, and friends) edit working trees in bursts: dozens of files written, deleted, refactored, then sometimes wholesale undone. Two things break under that workload when your project lives inside a cloud-synced folder:
+AI coding agents (Claude Code, Cursor, Aider) edit fast and undo often. When the project lives in a cloud-synced folder, two things break:
 
-1. **Cloud sync clients are bi-directional and stateful.** They diff *their* last-seen snapshot against the filesystem — not against the Git tree. When an agent deletes a file and then a rewind brings it *partly* back, the cloud's view of "deleted" gets confused. Files leak, ghosts return, conflicted copies appear.
-2. **They can't tell "deleted by user" from "vanished because the timeline moved."** A `git reset --hard HEAD~5` that removes 40 untracked-but-staged files looks, to OneDrive, like a 40-file deletion event. Half the time the client mirrors the delete; the other half it "rescues" the files back onto disk because it thinks something went wrong.
+1. **Cloud clients sync against their own snapshot, not against Git.** When an agent deletes a file and a rewind partially restores it, the cloud's "deleted" state goes out of sync. Files reappear, copies multiply, conflicts surface.
+2. **They can't tell intent from movement.** A `git reset --hard HEAD~5` that removes 40 files looks identical to a user deleting 40 files. Sometimes OneDrive propagates the delete, sometimes it "rescues" the files back.
 
-The result is a project directory that drifts away from what Git says it is, polluted with stale artifacts the next agent will then re-edit. The cure is to **stop treating the cloud folder as a workspace** and start treating it as a mirror — refreshed continuously from a source of truth that already knows how to express intent: the Git working tree.
-
-`gdsync` is that mirror.
+The fix is to stop using the cloud folder as a workspace. Use it as a mirror and refresh it from Git. That's all `gdsync` does.
 
 ---
 
 ## What it does
 
-- **Watches** your Git working tree with FSEvents (macOS) or fsnotify (Linux/Windows).
-- **Filters** every event through the repo's `.gitignore` (with nested-gitignore semantics matching Git itself) plus a hardcoded exclusion set: `.git/`, `.claude_code/`, `.cursor/`, `.DS_Store`, `*.tmp`, `node_modules/`.
-- **Copies** changed files to `--dest` using a temp-then-rename atomic write, so cloud clients never see half-written files.
-- **Deletes** files from `--dest` the moment they disappear from the source.
-- **Reconciles** the two trees on a 30-second cadence and on every Git state change (`.git/HEAD`, refs, packed-refs, index). This is the rewind detector — if a file is gone from `src` it gets removed from `dst`, no exceptions.
-- **Retries** with exponential backoff when the cloud client has the destination momentarily locked.
-- **Skips** symlinks entirely, by design (see below).
+- Watches the working tree with FSEvents (macOS) or fsnotify (Linux, Windows).
+- Honors `.gitignore`, including nested ones, plus a built-in skip list: `.git/`, `.claude_code/`, `.cursor/`, `.DS_Store`, `*.tmp`, `node_modules/`.
+- Copies via `temp + rename`. Cloud clients never see a partially written file.
+- Deletes from `--dest` the moment files disappear from the source.
+- Reconciles `src` and `dst` every 30 s and on every Git state change (`HEAD`, refs, packed-refs, index). This is the rewind detector.
+- Retries with exponential backoff on cloud-side file locks.
+- Skips symlinks entirely (see below).
 
 ---
 
-## Architecture & design decisions
+## Architecture
 
 <p align="center">
   <img src="docs/architecture.svg" alt="gdsync architecture: one-way data flow from a Git working tree, through event watchers, a debounce/queue stage, and a backoff-wrapped sync worker, into a cloud-mounted destination" width="100%">
 </p>
 
-### Git as the single source of truth
+### Git is the source of truth
 
-`gdsync` is intentionally unidirectional. Two-way sync invents a new class of problem: conflict resolution. Once you have a conflict resolver, you have an authoritative version, and once you have an authoritative version you've reinvented Git. So the model here is much simpler:
+`gdsync` only goes one way. Two-way sync needs conflict resolution, and conflict resolution needs an authoritative version — which is just Git, reinvented.
 
-- **`src` (Git working tree) → `dst` (cloud mount).** Always. Without exception.
-- Anything that exists in `dst` but not in `src` is — by definition — wrong, and will be removed on the next reconcile.
-- Users edit files in `src`. They read or share files via `dst`. They never need to think about which side is canonical, because only one side ever is.
+- `src` (Git tree) → `dst` (cloud mount). No exceptions.
+- Anything in `dst` that isn't in `src` is removed on the next reconcile.
+- You edit in `src`. You read or share via `dst`. Only one side is ever canonical.
 
-This eliminates the entire surface area of merge conflicts, "who wins" semantics, and cloud-client interpretation. The cost is real: changes made directly inside the destination folder are lost. That is the deal, and it is exactly the right deal for the use case.
+Trade-off: changes made directly in `dst` are lost. For this use case, that's the right call.
 
-### Resilient I/O: exponential backoff for cloud-induced locks
+### Retry on cloud-induced locks
 
-Cloud-sync clients aggressively open, hash, and re-upload files they consider "interesting." During those windows, `open()` and `rename()` against the destination can fail with:
+Cloud clients open, hash, and re-upload files in the background. While they hold a file, `open()` and `rename()` against the destination can fail with:
 
 - POSIX: `EAGAIN`, `EBUSY`, `ETXTBSY`, `EACCES`
-- Windows: `ERROR_SHARING_VIOLATION` (32), `ERROR_LOCK_VIOLATION` (33), `ERROR_ACCESS_DENIED` (5), `ERROR_CLOUD_FILE_IN_USE` (0x80070189)
+- Windows: `ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION`, `ERROR_ACCESS_DENIED`, `ERROR_CLOUD_FILE_IN_USE`
 
-These are transient. `gdsync` wraps every destination-side I/O operation in a classifier-driven retry: identify the error as retryable, back off (100 ms → 200 ms → 400 ms → … up to 30 s, jittered, max 8 attempts), and try again. Non-retryable errors (`ENOENT`, `ENOSPC`, etc.) fail fast so they're visible.
+`gdsync` retries with exponential backoff: 100 ms → 30 s, up to 8 attempts, jittered. Non-retryable errors (`ENOENT`, `ENOSPC`) fail fast.
 
-Writes are atomic: a temp file is created **inside the destination directory** (never `os.TempDir()` — that would cross volumes), `fsync`'d, then renamed over the final path. On Windows the rename goes through `MoveFileEx(... | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` via `golang.org/x/sys/windows`, so the operation is committed to disk before the call returns and cloud clients never observe a partial file.
+Writes are atomic. A temp file is created in the destination directory (not `os.TempDir()` — that crosses volumes), `fsync`'d, then renamed. On Windows the rename goes through `MoveFileEx` with `MOVEFILE_WRITE_THROUGH`, so it's committed to disk before the call returns.
 
-### Symlinks: skipped on purpose
+### Symlinks: skipped
 
-Symlink handling on Windows requires `SeCreateSymbolicLinkPrivilege`, which most user processes don't have. Adding "best-effort" symlink replication means shipping a feature that silently degrades on the second-most-important target platform, plus opening the door to symlink-cycle issues on the source side. `gdsync` declines that whole class of bug: symlinks in `src` are skipped at walk time, and any symlink that somehow appears in `dst` is treated as "has no `src` counterpart" and removed on the next reconcile. The behavior is identical on macOS and Windows, which is the whole point.
+Creating symlinks on Windows requires `SeCreateSymbolicLinkPrivilege`, which most user processes don't have. Rather than ship a feature that silently fails on Windows, `gdsync` skips symlinks on every platform. Source symlinks are ignored at walk time. Any symlink that ends up in `dst` is treated as an orphan and removed at the next reconcile.
 
-### Mtime + size, not content hashing
+### Size + mtime, not content hashing
 
-The reconciler compares files by `(size, mtime)` rather than by content hash. After every copy, `gdsync` explicitly sets `dst.mtime = src.mtime` via `Chtimes`, so the two should match exactly in steady state — with a 100 ms tolerance to absorb filesystem-resolution drift. OneDrive's habit of nudging `dst.mtime` *forward* after upload is tolerated by the comparison direction (only `src.mtime > dst.mtime + skew` triggers a copy). Content hashing was rejected because it linearly scans every byte on every pass, and the rewind-detection logic doesn't need it: a missing entry is a missing entry whether it's a 1-byte file or a 1-GB file.
+The reconciler compares files by `(size, mtime)`. After every copy, `Chtimes` sets `dst.mtime = src.mtime`, so the steady state is exact equality within a 100 ms tolerance. OneDrive sometimes pushes `dst.mtime` forward after upload — the comparison only triggers when `src.mtime > dst.mtime + skew`, so that case is absorbed. Content hashing would scan every byte on every pass; rewind detection doesn't need it.
 
 ### Per-platform watching
 
-- **macOS** uses `github.com/fsnotify/fsevents`. FSEvents is natively recursive and cheap with file descriptors — a 50 k-directory repo costs essentially nothing to watch.
-- **Linux / Windows** uses `github.com/fsnotify/fsnotify` with manual recursive descent. On Create events, the new subtree is walked and registered immediately, with synthetic Create events emitted for any children that appear before the watcher attaches (closing the well-known fsnotify race).
+- **macOS** uses `github.com/fsnotify/fsevents`. Recursive natively, easy on file descriptors.
+- **Linux / Windows** use `github.com/fsnotify/fsnotify`. Recursive descent is done at startup. On new-directory events the subtree is walked, a watcher is added, and synthetic Create events are emitted for any children that landed before the watcher attached (the standard fsnotify race).
 
-Per-path debouncing (default 1 s) collapses the editor save dance — write-temp + rename + fsync, sometimes repeated — into a single sync action keyed on the final filename.
+A 1 s per-path debounce collapses editor save sequences (write-temp + rename + fsync) into a single sync action.
 
 ### Git-state surveillance
 
-A second watcher tracks `.git/HEAD`, `.git/refs/heads/`, `.git/packed-refs`, and `.git/index`. Any change there triggers an immediate reconcile. This is what catches:
+A second watcher tracks `.git/HEAD`, `refs/heads/`, `packed-refs`, and `index`. Any change triggers an immediate reconcile. This catches:
 
 - branch switches (`git checkout`)
 - hard resets on the current branch (`git reset --hard`, where HEAD doesn't move but a ref does)
 - index-only operations (`git checkout -- file`)
 - garbage-collected refs (now in `packed-refs`)
 
-Without this, you'd be waiting up to `--interval` seconds for the periodic reconcile to notice. With it, the cloud catches up within milliseconds of the Git operation completing.
+Without this, you'd wait up to `--interval` seconds. With it, the cloud catches up in milliseconds.
 
 ---
 
-## Installation
+## Install
 
-### Go install (recommended)
+### Go install
 
 ```sh
 go install git-drive-sync/cmd/gdsync@latest
 ```
 
-This drops the `gdsync` binary into `$(go env GOBIN)` (defaulting to `$HOME/go/bin`).
-
-### Build from source
+### From source
 
 ```sh
 git clone <this repo> && cd git-drive-sync
@@ -113,53 +108,48 @@ make dist            # → bin/gdsync-{darwin-arm64,darwin-amd64,windows-amd64.e
 
 ### Pre-built binaries
 
-Cross-compiled binaries for macOS (arm64 + amd64) and Windows (amd64) are produced by `make dist`. Drop one onto your `PATH` and you're done — no runtime, no daemon, no service to install.
+`make dist` produces macOS (arm64 + amd64) and Windows (amd64) binaries. Drop one on `PATH`.
 
-**Requires** Go 1.22+ for source builds. Pre-built binaries have no runtime dependency.
+Source builds need Go 1.22+. Pre-built binaries have no runtime dependency.
 
 ---
 
 ## Usage
 
-### The zero-config path
-
 ```sh
-# 1. Stand in a Git repo.
 cd ~/Code/my-project
-
-# 2. Point gdsync at the cloud-mounted folder you want to mirror into.
 gdsync --dest ~/OneDrive/my-project
 ```
 
-That's the whole interface. `gdsync` reads your `.gitignore`, copies everything else, then watches forever. Hit `Ctrl-C` and it flushes a final reconcile before exiting.
+That's it. `gdsync` reads `.gitignore`, copies the rest, and watches. `Ctrl-C` flushes a final reconcile before exit.
 
-### Common flags
+### Flags
 
-| Flag | Default | What it does |
+| Flag | Default | Effect |
 |---|---|---|
-| `--dest` | *(required)* | Destination directory (e.g. a OneDrive mount). Will be created if missing. |
-| `--interval` | `30s` | How often to run the full reconcile pass. |
-| `--debounce` | `1s` | How long to wait for follow-up events on the same path before syncing. |
-| `--dry-run` | `false` | Log every action without touching the destination. |
-| `-v`, `--verbose` | `false` | DEBUG-level logging (per-file copy/delete events). |
-| `--once` | `false` | Run one full reconcile and exit. Good for cron / pre-commit hooks. |
-| `--max-retries` | `8` | How hard to fight cloud-side file locks before giving up on a single file. |
+| `--dest` | required | Destination directory. Created if missing. |
+| `--interval` | `30s` | Full reconcile interval. |
+| `--debounce` | `1s` | Event debounce window per path. |
+| `--dry-run` | `false` | Log actions; write nothing. |
+| `-v`, `--verbose` | `false` | DEBUG-level logging. |
+| `--once` | `false` | One reconcile pass, then exit. |
+| `--max-retries` | `8` | Retries on cloud-side file locks. |
 
 ### Recipes
 
-**One-shot mirror, no watcher** — perfect for `cron`:
+One-shot, no watcher (good for `cron`):
 
 ```sh
 gdsync --dest ~/OneDrive/my-project --once
 ```
 
-**Watch in dry-run while you tune `.gitignore`**:
+Tune `.gitignore` in dry-run:
 
 ```sh
 gdsync --dest /tmp/inspect --dry-run -v
 ```
 
-**Run as a background mirror on macOS** (until a `gdsync install` subcommand lands):
+Background on macOS:
 
 ```sh
 nohup gdsync --dest ~/OneDrive/my-project > ~/Library/Logs/gdsync.log 2>&1 &
@@ -167,57 +157,44 @@ nohup gdsync --dest ~/OneDrive/my-project > ~/Library/Logs/gdsync.log 2>&1 &
 
 ---
 
-## What's NOT in scope (yet)
+## Out of scope
 
-By design, the MVP keeps the surface area small. The following are deliberately out of scope:
-
-- **Bi-directional sync** — see "Git as the single source of truth" above. This will never be added.
-- **Multiple destinations in one process** — run one `gdsync` per `--dest` for now.
-- **`gdsync install` / launchd / systemd integration** — use `nohup` or your platform's service manager.
-- **Configuration files** (`.gdsync.yaml`) — flags only, for now.
-- **Conflict resolution UI / web dashboard** — there are no conflicts.
+- **Two-way sync.** See "Git is the source of truth." Never coming.
+- **Multiple destinations per process.** Run one `gdsync` per `--dest`.
+- **Service installer (`launchd` / `systemd`).** Use your OS's service manager.
+- **Config files.** Flags only, for now.
+- **Conflict resolution.** There are no conflicts.
 
 ---
 
-## Project layout
+## Layout
 
 ```
 gdsync/
-├── cmd/gdsync/main.go          # cobra entrypoint, event/dispatch loop
+├── cmd/gdsync/main.go          # cobra entry, event/dispatch loop
 └── internal/
     ├── config/                 # flag parsing, path canonicalization
-    ├── gitignore/              # matcher (uses go-git's gitignore parser)
-    ├── watcher/                # FSEvents (darwin) + fsnotify (others)
-    ├── sync/                   # backoff, retry classification, atomic copy, reconcile
+    ├── gitignore/              # matcher (go-git's parser)
+    ├── watcher/                # FSEvents + fsnotify
+    ├── sync/                   # backoff, retry, atomic copy, reconcile
     ├── gitstate/               # HEAD / refs / index watcher
-    └── log/                    # slog wrapper with verbose toggle
+    └── log/                    # slog wrapper
 ```
 
-The full architecture write-up lives in the design plan; the high-level flow is:
-
-```
-   fsnotify/FSEvents ─┐
-                     ├─▶  debounce  ──▶  serialized sync worker  ──▶  dst
-   git state watch  ─┤                                  ▲
-                     │                                  │
-   periodic ticker  ─┴──────────▶  reconcile  ──────────┘
-```
-
-A single mutex serializes all destination writes, so the reconciler and the live event handler can never race.
+A single mutex serializes all destination writes. The reconciler and the event handler can't race.
 
 ---
 
 ## Testing
 
 ```sh
-go test ./...        # unit tests: gitignore matcher, backoff retry, syncer
-make vet             # go vet ./...
+go test ./...
+make vet
 ```
 
-Smoke-test the binary end-to-end:
+End-to-end smoke test:
 
 ```sh
-# Initial sync, .gitignore enforcement, hardcoded exclusions, rewind detection.
 SRC=$(mktemp -d) && DST=$(mktemp -d) && cd $SRC && git init -q
 echo "*.log" > .gitignore
 echo hello > a.txt && echo ignored > debug.log
@@ -225,22 +202,20 @@ gdsync --dest $DST --once -v
 ls $DST                          # → a.txt, .gitignore
 rm a.txt
 gdsync --dest $DST --once -v
-ls $DST                          # → just .gitignore (rewind propagated)
+ls $DST                          # → .gitignore only (rewind propagated)
 ```
 
 ---
 
 ## License
 
-[MIT](LICENSE) © 2026 Hikaru Minagawa
+[MIT](LICENSE) © 2026 Luca Minagawa
 
 ---
 
-## Acknowledgements
-
-Built on the shoulders of:
+## Built on
 
 - [`spf13/cobra`](https://github.com/spf13/cobra) — CLI framework
-- [`fsnotify/fsnotify`](https://github.com/fsnotify/fsnotify) and [`fsnotify/fsevents`](https://github.com/fsnotify/fsevents) — filesystem event delivery
-- [`go-git/go-git`](https://github.com/go-git/go-git) — the only gitignore matcher in the Go ecosystem with faithful nested-`.gitignore` and negation semantics
-- [`golang.org/x/sys/windows`](https://pkg.go.dev/golang.org/x/sys/windows) — `MoveFileEx` and the Win32 error catalogue
+- [`fsnotify/fsnotify`](https://github.com/fsnotify/fsnotify) + [`fsnotify/fsevents`](https://github.com/fsnotify/fsevents) — filesystem events
+- [`go-git/go-git`](https://github.com/go-git/go-git) — gitignore parser with correct nested semantics
+- [`golang.org/x/sys/windows`](https://pkg.go.dev/golang.org/x/sys/windows) — `MoveFileEx`
