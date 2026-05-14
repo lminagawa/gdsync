@@ -1,0 +1,103 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-darwin:
+    name: Build darwin/${{ matrix.goarch }}
+    # fsevents binds to CoreServices via cgo, so darwin must be built on a
+    # macOS runner with the system SDK available.
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [arm64, amd64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '1'
+        run: |
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o "dist/gdsync-darwin-${{ matrix.goarch }}" \
+            ./cmd/gdsync
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gdsync-darwin-${{ matrix.goarch }}
+          path: dist/gdsync-darwin-${{ matrix.goarch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    name: Build windows/amd64
+    # Windows build uses pure-Go fsnotify (no cgo), so cross-compiling from
+    # Linux is fine and much faster than spinning up a Windows runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o "dist/gdsync-windows-amd64.exe" \
+            ./cmd/gdsync
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gdsync-windows-amd64
+          path: dist/gdsync-windows-amd64.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub release
+    needs: [build-darwin, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        working-directory: dist
+        run: sha256sum * | tee checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true

@@ -228,7 +228,7 @@ ls $DST                          # → just .gitignore (rewind propagated)
 
 ## License
 
-MIT (LICENSE pending).
+[MIT](LICENSE) © 2026 Hikaru Minagawa
 
 ---
 
