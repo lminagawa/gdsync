@@ -39,52 +39,9 @@ The result is a project directory that drifts away from what Git says it is, pol
 
 ## Architecture & design decisions
 
-```mermaid
-%%{init: {'theme':'neutral', 'flowchart': {'curve':'linear', 'nodeSpacing': 40, 'rankSpacing': 60}}}%%
-flowchart LR
-    SRC[("Git Working Tree")]
-
-    subgraph WATCH ["Event Watchers"]
-        direction TB
-        FS["fsnotify<br/>Linux · Windows"]
-        FE["FSEvents<br/>macOS"]
-        GS["Git State<br/>HEAD · refs · index"]
-    end
-
-    subgraph PIPE ["Debounce & Queue"]
-        direction TB
-        DB["Per-path Debounce<br/>1s window"]
-        RC["Periodic Reconcile<br/>30s · full src ↔ dst diff"]
-        TQ["Serialized Task Queue"]
-    end
-
-    subgraph WORK ["Sync Worker"]
-        direction TB
-        EB["Exponential Backoff<br/>100ms → 30s · max 8"]
-        OP["Atomic Copy · Delete<br/>temp + rename"]
-    end
-
-    DST[("Cloud Mount<br/>OneDrive · Google Drive")]
-
-    SRC --> FS
-    SRC --> FE
-    SRC -.-> GS
-    FS --> DB
-    FE --> DB
-    GS --> RC
-    DB --> TQ
-    RC --> TQ
-    TQ --> EB
-    EB --> OP
-    OP --> DST
-
-    classDef endpoint fill:#f6f6f6,stroke:#444,stroke-width:1.4px,color:#111
-    classDef stage fill:#ffffff,stroke:#888,stroke-width:1px,color:#222
-    class SRC,DST endpoint
-    class FS,FE,GS,DB,RC,TQ,EB,OP stage
-```
-
-<sub><i>One-way data flow. Solid arrows carry file events; the dotted arrow carries Git-state notifications. All destination writes funnel through a single serialized worker, so reconcile passes never race the live event handler.</i></sub>
+<p align="center">
+  <img src="docs/architecture.svg" alt="gdsync architecture: one-way data flow from a Git working tree, through event watchers, a debounce/queue stage, and a backoff-wrapped sync worker, into a cloud-mounted destination" width="100%">
+</p>
 
 ### Git as the single source of truth
 

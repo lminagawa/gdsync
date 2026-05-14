@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 520" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="title">gdsync architecture: one-way data flow from a Git working tree to a cloud-mounted folder</title>
+  <desc id="desc">A horizontal pipeline. Source (Git Working Tree) feeds three event watchers (fsnotify, FSEvents, Git State), which in turn feed the Debounce and Queue stage, then a Sync Worker with exponential backoff, finally writing to a cloud-mounted destination.</desc>
+
+  <defs>
+    <!-- Solid arrowhead -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2a2a2a"/>
+    </marker>
+    <!-- Lighter arrowhead for the dotted git-state edge -->
+    <marker id="arrow-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7a7a7a"/>
+    </marker>
+  </defs>
+
+  <style>
+    .group-bg     { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1; }
+    .group-label  { fill: #6a6a6a; font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; }
+    .node         { fill: #ffffff; stroke: #8a8a8a; stroke-width: 1; }
+    .node-endpoint{ fill: #f1f1f1; stroke: #2a2a2a; stroke-width: 1.4; }
+    .node-title   { fill: #111111; font-size: 14px; font-weight: 600; }
+    .node-sub     { fill: #5a5a5a; font-size: 11.5px; }
+    .edge         { stroke: #2a2a2a; stroke-width: 1.4; fill: none; }
+    .edge-dim     { stroke: #7a7a7a; stroke-width: 1.2; fill: none; stroke-dasharray: 4 4; }
+    .caption      { fill: #5a5a5a; font-size: 11.5px; font-style: italic; }
+  </style>
+
+  <!-- ========== Group backgrounds ========== -->
+  <!-- Source -->
+  <rect class="group-bg" x="20"   y="80"  width="160" height="280" rx="10"/>
+  <text class="group-label" x="100" y="100" text-anchor="middle">Source</text>
+
+  <!-- Event Watchers -->
+  <rect class="group-bg" x="240"  y="80"  width="240" height="380" rx="10"/>
+  <text class="group-label" x="360" y="100" text-anchor="middle">Event Watchers</text>
+
+  <!-- Debounce & Queue -->
+  <rect class="group-bg" x="540"  y="80"  width="240" height="380" rx="10"/>
+  <text class="group-label" x="660" y="100" text-anchor="middle">Debounce &amp; Queue</text>
+
+  <!-- Sync Worker -->
+  <rect class="group-bg" x="840"  y="80"  width="220" height="280" rx="10"/>
+  <text class="group-label" x="950" y="100" text-anchor="middle">Sync Worker</text>
+
+  <!-- Destination -->
+  <rect class="group-bg" x="1080" y="80"  width="140" height="280" rx="10"/>
+  <text class="group-label" x="1150" y="100" text-anchor="middle">Destination</text>
+
+  <!-- ========== Source (cylinder via ellipse + rect) ========== -->
+  <g>
+    <ellipse class="node-endpoint" cx="100" cy="180" rx="56" ry="14"/>
+    <path class="node-endpoint" d="M 44 180 L 44 260 A 56 14 0 0 0 156 260 L 156 180" fill="#f1f1f1"/>
+    <ellipse class="node-endpoint" cx="100" cy="180" rx="56" ry="14"/>
+    <text class="node-title" x="100" y="225" text-anchor="middle">Git Working</text>
+    <text class="node-title" x="100" y="244" text-anchor="middle">Tree</text>
+  </g>
+
+  <!-- ========== Watchers (3 boxes) ========== -->
+  <g>
+    <rect class="node" x="270" y="135" width="180" height="76" rx="6"/>
+    <text class="node-title" x="360" y="165" text-anchor="middle">fsnotify</text>
+    <text class="node-sub"   x="360" y="186" text-anchor="middle">Linux · Windows</text>
+  </g>
+  <g>
+    <rect class="node" x="270" y="235" width="180" height="76" rx="6"/>
+    <text class="node-title" x="360" y="265" text-anchor="middle">FSEvents</text>
+    <text class="node-sub"   x="360" y="286" text-anchor="middle">macOS</text>
+  </g>
+  <g>
+    <rect class="node" x="270" y="335" width="180" height="100" rx="6"/>
+    <text class="node-title" x="360" y="370" text-anchor="middle">Git State Watcher</text>
+    <text class="node-sub"   x="360" y="391" text-anchor="middle">HEAD · refs</text>
+    <text class="node-sub"   x="360" y="408" text-anchor="middle">packed-refs · index</text>
+  </g>
+
+  <!-- ========== Pipeline (3 boxes) ========== -->
+  <g>
+    <rect class="node" x="570" y="135" width="180" height="76" rx="6"/>
+    <text class="node-title" x="660" y="165" text-anchor="middle">Per-path Debounce</text>
+    <text class="node-sub"   x="660" y="186" text-anchor="middle">1 s window</text>
+  </g>
+  <g>
+    <rect class="node" x="570" y="235" width="180" height="76" rx="6"/>
+    <text class="node-title" x="660" y="265" text-anchor="middle">Serialized Queue</text>
+    <text class="node-sub"   x="660" y="286" text-anchor="middle">single sync mutex</text>
+  </g>
+  <g>
+    <rect class="node" x="570" y="335" width="180" height="100" rx="6"/>
+    <text class="node-title" x="660" y="370" text-anchor="middle">Periodic Reconcile</text>
+    <text class="node-sub"   x="660" y="391" text-anchor="middle">30 s ticker</text>
+    <text class="node-sub"   x="660" y="408" text-anchor="middle">full src ↔ dst diff</text>
+  </g>
+
+  <!-- ========== Sync Worker (2 boxes) ========== -->
+  <g>
+    <rect class="node" x="870" y="155" width="160" height="76" rx="6"/>
+    <text class="node-title" x="950" y="180" text-anchor="middle">Exponential</text>
+    <text class="node-title" x="950" y="198" text-anchor="middle">Backoff</text>
+    <text class="node-sub"   x="950" y="218" text-anchor="middle">100 ms → 30 s · ×8</text>
+  </g>
+  <g>
+    <rect class="node" x="870" y="255" width="160" height="76" rx="6"/>
+    <text class="node-title" x="950" y="280" text-anchor="middle">Atomic Copy</text>
+    <text class="node-title" x="950" y="298" text-anchor="middle">/ Delete</text>
+    <text class="node-sub"   x="950" y="318" text-anchor="middle">temp + rename</text>
+  </g>
+
+  <!-- ========== Destination (cylinder) ========== -->
+  <g>
+    <ellipse class="node-endpoint" cx="1150" cy="180" rx="56" ry="14"/>
+    <path class="node-endpoint" d="M 1094 180 L 1094 260 A 56 14 0 0 0 1206 260 L 1206 180" fill="#f1f1f1"/>
+    <ellipse class="node-endpoint" cx="1150" cy="180" rx="56" ry="14"/>
+    <text class="node-title" x="1150" y="225" text-anchor="middle">Cloud Mount</text>
+    <text class="node-sub"   x="1150" y="246" text-anchor="middle">OneDrive · GDrive</text>
+  </g>
+
+  <!-- ========== Edges ========== -->
+  <!-- Source → fsnotify -->
+  <path class="edge" d="M 162 220 C 210 220, 230 173, 268 173" marker-end="url(#arrow)"/>
+  <!-- Source → FSEvents -->
+  <path class="edge" d="M 162 240 C 210 240, 230 273, 268 273"  marker-end="url(#arrow)"/>
+  <!-- Source ··› Git State (dotted) -->
+  <path class="edge-dim" d="M 130 270 C 150 320, 200 370, 268 380" marker-end="url(#arrow-dim)"/>
+
+  <!-- Watchers → Debounce -->
+  <path class="edge" d="M 452 173 L 568 173" marker-end="url(#arrow)"/>
+  <path class="edge" d="M 452 273 C 510 273, 510 173, 568 173" marker-end="url(#arrow)"/>
+  <!-- Git State → Reconcile -->
+  <path class="edge" d="M 452 385 L 568 385" marker-end="url(#arrow)"/>
+
+  <!-- Debounce → Queue, Reconcile → Queue -->
+  <path class="edge" d="M 660 213 L 660 233" marker-end="url(#arrow)"/>
+  <path class="edge" d="M 660 333 L 660 313" marker-end="url(#arrow)"/>
+
+  <!-- Queue → Backoff -->
+  <path class="edge" d="M 752 273 C 800 273, 820 193, 868 193" marker-end="url(#arrow)"/>
+  <!-- Backoff → Copy/Delete -->
+  <path class="edge" d="M 950 233 L 950 253" marker-end="url(#arrow)"/>
+  <!-- Copy/Delete → Cloud -->
+  <path class="edge" d="M 1032 293 C 1060 293, 1080 220, 1094 220" marker-end="url(#arrow)"/>
+
+  <!-- ========== Footer caption ========== -->
+  <text class="caption" x="620" y="495" text-anchor="middle">
+    One-way data flow. Solid arrows carry file events; the dotted arrow carries Git-state notifications.
+  </text>
+  <text class="caption" x="620" y="512" text-anchor="middle">
+    All destination writes funnel through a single serialized worker, so reconcile passes never race the live event handler.
+  </text>
+</svg>
